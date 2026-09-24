@@ -1,46 +1,56 @@
 {
-  "location": {
-    "home_city": "Poznań",
-    "home_lat": 52.4064,
-    "home_lon": 16.9252
-  },
-  "ai": {
-    "system_prompt": "Jesteś bezwzględnym polskim mechanikiem i rzeczoznawcą aut. Oceniasz konkretną ofertę bez lania wody. Pisz czystą, poprawną polszczyzną. Nigdy nie wypisuj braków danych. Pisz wyłącznie o konkretach z ogłoszenia. Odpowiadaj tylko w podanym formacie.",
-    "user_prompt_template": "Oferta: {title} | Cena: {price} | Lokalizacja: {location}\nDane:\n{details}\n\nOpis:\n\"\"\"{description}\"\"\"\n\nFormat odpowiedzi:\nOCENA: [X/10 i 1 konkretne zdanie werdyktu opłacalności]\nSERWIS: [Wypisz wymienione części: rozrząd, oleje, hamulce, sprzęgło; jeśli brak wzmianki o naprawach, pomiń tę linię]\nLPG: [Jeśli ma już gaz: ile lat ma instalacja i kiedy koniec butli; jeśli nie ma gazu, pomiń tę linię]\nMINY: [1-2 ryzyka: typowe awarie tego silnika/skrzyni przy tym przebiegu lub podejrzane fragmenty opisu]"
-  },
-  "forbidden_words": [
-    "kia", "ceed", "cee'd", "hyundai", "i30",
-    "diesel", "cdti", "crdi", "tdi", "multijet", "jtd", "hdi", "dci", "on", "d-4d"
-  ],
-  "sus_phrases": [
-    "igła", "igla", "niemiec płakał", "płakał jak sprzedawał", "jedyny taki",
-    "nie wymaga wkładu", "od emeryta", "od dziadka", "perełka", "stan salonowy",
-    "okazja", "100% bezwypadkowy", "bezwypadek", "panie"
-  ],
-  "targets": [
-    {
-      "name": "Opel Astra J Kombi 1.4 Turbo",
-      "olx_slug": "astra-j-kombi-1.4-turbo",
-      "price_min": 20000,
-      "price_max": 35000,
-      "year_min": 2012,
-      "mileage_max": 200000,
-      "fuel_types": ["petrol", "lpg"],
-      "filters": {
-        "engine_capacity_patterns": ["1364", "1400", "1398", "1.4"],
-        "forbidden_titles": ["1.6", "1.7", "2.0", "1.8"],
-        "forbidden_power": ["87 KM", "100 KM"]
-      }
-    },
-    {
-      "name": "Fiat Tipo Kombi",
-      "olx_slug": "tipo-kombi",
-      "price_min": 20000,
-      "price_max": 35000,
-      "year_min": 2012,
-      "mileage_max": 200000,
-      "fuel_types": ["petrol", "lpg"],
-      "filters": {}
-    }
-  ]
+  "dealer_exclusions": {
+    "reject_company_sellers": true,
+    "banned_keywords": [
+      "możliwość wymiany",
+      "mozliwosc wymiany",
+      "przyjmiemy w rozliczeniu",
+      "przyjmę w rozliczeniu",
+      "przyjme w rozliczeniu",
+      "zamiana na inne auto",
+      "zamiana na tańszy",
+      "zamiana na tanszy",
+      "zamiana na droższy",
+      "zamiana na drozszy",
+      "możliwa zamiana",
+      "mozliwa zamiana",
+      "kupujący zwolniony z opłaty skarbowej",
+      "kupujacy zwolniony z oplaty skarbowej",
+      "zwolniony z pcc",
+      "kredyt, leasing",
+      "kredyt leasing",
+      "raty bez bik",
+      "autokomis",
+      "auto-komis",
+      "salon samochodów używanych",
+      "salon samochodow uzywanych",
+      "sprowadzony na zamówienie",
+      "sprowadzamy auta",
+      "oferta komisowa",
+      "świeżo sprowadzony",
+      "swiezo sprowadzony",
+      "świeżo sprowadzone",
+      "swiezo sprowadzone",
+      "świeżo sprowadzona",
+      "swiezo sprowadzona",
+      "auto sprowadzone",
+      "samochód sprowadzony",
+      "samochod sprowadzony",
+      "sprowadzony z niemiec",
+      "sprowadzona z niemiec",
+      "sprowadzony ze szwajcarii",
+      "sprowadzony z francji",
+      "sprowadzony z holandii",
+      "sprowadzony z belgii",
+      "do opłat",
+      "do oplat",
+      "do rejestracji",
+      "opłacony przygotowany do rejestracji",
+      "oplacony przygotowany do rejestracji",
+      "koszt rejestracji",
+      "tablice zjazdowe",
+      "powrót na kołach",
+      "powrot na kolach"
+    ]
+  }
 }
