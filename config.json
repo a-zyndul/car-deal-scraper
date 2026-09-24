@@ -7,7 +7,7 @@
   "search_targets": [
     {
       "name": "Opel Astra J Polift",
-      "url": "https://www.olx.pl/motoryzacja/samochody/opel/astra/od-2013/?search%5Bfilter_float_price%3Afrom%5D=18000&search%5Bfilter_float_price%3Ato%5D=35000&search%5Bfilter_enum_model%5D%5B0%5D=astra-j&search%5Border%5D=created_at%3Adesc"
+      "url": "https://www.olx.pl/motoryzacja/samochody/opel/astra/?search%5Bfilter_float_price%3Afrom%5D=18000&search%5Bfilter_float_price%3Ato%5D=35000&search%5Bfilter_float_year%3Afrom%5D=2013&search%5Bfilter_float_year%3Ato%5D=2018&search%5Bfilter_enum_model%5D%5B0%5D=astra-j&search%5Border%5D=created_at%3Adesc"
     }
   ],
   "system_prompt": "Jesteś cynicznym, doświadczonym polskim mechanikiem. Na podstawie podanego tytułu i opisu sprzedawcy oceń stan auta i opłacalność zakupu. Pisz krótko i konkretnie. Nie kopiuj instrukcji ani nawiasów. Jeśli w opisie nie ma wzmianki o naprawach lub LPG, pomiń te sekcje.\n\nStruktura odpowiedzi (zastosuj dokładnie taki układ):\nOCENA: X/10 - (krótki werdykt w jednym zdaniu)\nSERWIS: (co zrobiono wg opisu: rozrząd, zawieszenie, płyny)\nLPG: (stan instalacji, data butli)\nMINY: (typowe bolączki tego silnika/skrzyni, na co uważać)",

@@ -19,7 +19,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://100.120.167.113:11344")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://100.120.167.113:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 SEEN_IDS_FILE = os.path.expanduser("~/scraper/seen_ids.json")
@@ -86,7 +86,7 @@ def is_dealer_or_trader(title: str, description: str, config: dict, is_business:
     return False, ""
 
 
-def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, str, dict]:
+def fetch_listing_details(url: str) -> tuple[str, dict]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -94,7 +94,7 @@ def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, st
     try:
         r = requests.get(url, headers=headers, impersonate="chrome120", timeout=12)
         if r.status_code != 200:
-            return "Brak opisu", fallback_photo, extracted_params
+            return "Brak opisu", extracted_params
 
         soup = BeautifulSoup(r.text, "html.parser")
         description = ""
@@ -110,13 +110,7 @@ def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, st
             if desc_sec:
                 description = desc_sec.get_text(separator="\n", strip=True)
 
-        # Wyciąganie najlepszego zdjęcia z ogłoszenia
-        photo_url = fallback_photo
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            photo_url = og_img["content"]
-
-        # Odczytywanie parametrów tekstowych (dla Otomoto i HTML fallback)
+        # Odczytywanie parametrów tekstowych, jeśli brakuje ich w głównym feedzie
         text_full = soup.get_text()
         year_match = re.search(r"Rok produkcji\s*[:\-]?\s*(\d{4})", text_full, re.IGNORECASE)
         if year_match:
@@ -136,10 +130,10 @@ def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, st
             if len(raw_fuel) < 20:
                 extracted_params["fuel"] = raw_fuel
 
-        return description or "Brak opisu", photo_url, extracted_params
+        return description or "Brak opisu", extracted_params
     except Exception as e:
         logging.warning(f"Błąd pobierania detali z {url}: {e}")
-        return "Brak opisu", fallback_photo, extracted_params
+        return "Brak opisu", extracted_params
 
 
 def analyze_with_ai(system_prompt: str, user_payload: str) -> str:
@@ -165,37 +159,18 @@ def analyze_with_ai(system_prompt: str, user_payload: str) -> str:
     return "Błąd generowania analizy AI."
 
 
-def send_telegram_message(caption: str, photo_url: str = None):
+def send_telegram_message(caption: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logging.warning("Brak tokenów Telegrama w .env")
         return
 
-    # Wysłanie zdjęcia natywnie (sendPhoto) bez błędu 400
-    if photo_url and photo_url.startswith("http"):
-        send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "photo": photo_url,
-            "caption": caption[:1024],
-            "parse_mode": "HTML"
-        }
-        try:
-            r = requests.post(send_url, data=data, timeout=15)
-            if r.status_code == 200:
-                logging.info("Wysłano powiadomienie ze zdjęciem na Telegram")
-                return
-            else:
-                logging.warning(f"Telegram photo error ({r.status_code}): {r.text}, wysyłam tekst...")
-        except Exception as e:
-            logging.warning(f"Błąd wysyłki zdjęcia: {e}")
-
-    # Fallback na wiadomość tekstową
+    # Proste i niezawodne wysyłanie tekstu z podglądem linku generowanym przez Telegrama
     send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": caption[:4096],
         "parse_mode": "HTML",
-        "disable_web_page_preview": True
+        "disable_web_page_preview": False
     }
     try:
         r = requests.post(send_url, json=payload, timeout=10)
@@ -270,15 +245,11 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                     match = re.search(r"-ID([a-zA-Z0-9]+)\.html", ad_url)
                     ad_id = match.group(1) if match else clean_url(ad_url)
 
-                img_tag = card.find("img")
-                photo_url = img_tag.get("src") or img_tag.get("data-src") if img_tag else None
-
                 listing_grid.append({
                     "id": str(ad_id),
                     "title": title,
                     "url": ad_url,
                     "price_str": price,
-                    "photo_url": photo_url,
                     "is_html_fallback": True
                 })
 
@@ -299,7 +270,6 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 item_url = clean_url(item["url"])
                 title = item["title"]
                 price = item["price_str"]
-                fallback_photo = item["photo_url"]
                 is_business = False
                 year = mileage = engine = fuel = ""
                 city = "Polska"
@@ -321,8 +291,6 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 lon = loc.get("longitude")
                 user_info = item.get("user", {})
                 is_business = bool(user_info.get("company_name") or user_info.get("is_business"))
-                photos = item.get("photos", [])
-                fallback_photo = photos[0].get("link", "").replace("{width}x{height}", "1000x750") if photos else None
 
             if not item_id or item_id in seen_ids:
                 continue
@@ -333,7 +301,7 @@ def scan_target(target: dict, seen_ids: set, config: dict):
             platform = get_platform_name(item_url)
 
             # Pobieranie szczegółowego opisu i brakujących parametrów z pojedynczej strony
-            description, photo_url, extra_params = fetch_listing_details(item_url, fallback_photo=fallback_photo)
+            description, extra_params = fetch_listing_details(item_url)
 
             if not year and "year" in extra_params:
                 year = extra_params["year"]
@@ -382,7 +350,7 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 f"🤖 <b>ANALIZA MECHANIKA (AI):</b>\n{ai_summary}"
             )
 
-            send_telegram_message(msg, photo_url=photo_url)
+            send_telegram_message(msg)
             time.sleep(random.uniform(2.0, 4.0))
 
     except Exception as e:
