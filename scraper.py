@@ -367,34 +367,105 @@ def scan_target(target: dict, seen_ids: set, config: dict):
     name = target.get("name", "Pojazd")
     logging.info(f"Skanuję: {name}")
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pl,en-US;q=0.7,en;q=0.3",
+    }
+
     try:
-        r = requests.get(url, impersonate="chrome120", timeout=12)
+        r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
         if r.status_code != 200:
             logging.error(f"HTTP {r.status_code} dla {url}")
             return
 
         soup = BeautifulSoup(r.text, "html.parser")
+        listing_grid = []
+
+        # 1. Próba z tagu __NEXT_DATA__
         script_tag = soup.find("script", id="__NEXT_DATA__")
-        if not script_tag:
-            logging.warning("Nie znaleziono tagu __NEXT_DATA__")
+        if script_tag and script_tag.string:
+            try:
+                data = json.loads(script_tag.string)
+                listing_grid = (
+                    data.get("props", {})
+                    .get("pageProps", {})
+                    .get("data", {})
+                    .get("visibleAds", [])
+                )
+            except Exception as e:
+                logging.warning(f"Błąd parsowania __NEXT_DATA__: {e}")
+
+        # 2. Fallback: bezpośrednie parsowanie kafelków ogłoszeń z HTML, jeśli __NEXT_DATA__ brak
+        if not listing_grid:
+            cards = soup.find_all("div", {"data-cy": "l-card"})
+            for card in cards:
+                link_tag = card.find("a", href=True)
+                if not link_tag:
+                    continue
+                ad_url = link_tag["href"]
+                if not ad_url.startswith("http"):
+                    ad_url = f"https://www.olx.pl{ad_url}"
+                
+                title_tag = card.find("h6") or card.find("h4")
+                title = title_tag.get_text(strip=True) if title_tag else "Brak tytułu"
+                
+                price_tag = card.find("p", {"data-testid": "ad-price"})
+                price = price_tag.get_text(strip=True) if price_tag else "Brak ceny"
+
+                # Wyciągnięcie ID z atrybutu lub linku
+                ad_id = card.get("id") or re.search(r"-ID([a-zA-Z0-9]+)\.html", ad_url)
+                if isinstance(ad_id, re.Match):
+                    ad_id = ad_id.group(1)
+
+                # Pierwsze zdjęcie
+                img_tag = card.find("img")
+                photo_url = img_tag.get("src") or img_tag.get("data-src") if img_tag else None
+
+                listing_grid.append({
+                    "id": str(ad_id) if ad_id else clean_url(ad_url),
+                    "title": title,
+                    "url": ad_url,
+                    "price_str": price,
+                    "photo_url": photo_url,
+                    "is_html_fallback": True
+                })
+
+        if not listing_grid:
+            logging.warning("Nie znaleziono ogłoszeń (brak __NEXT_DATA__ i selektorów HTML).")
             return
 
-        data = json.loads(script_tag.string)
-        listing_grid = (
-            data.get("props", {})
-            .get("pageProps", {})
-            .get("data", {})
-            .get("visibleAds", [])
-        )
-
-        my_lat = config.get("my_location", {}).get("latitude")
-        my_lon = config.get("my_location", {}).get("longitude")
-        my_city = config.get("my_location", {}).get("city_name", "Poznań")
+        my_lat = config.get("my_location", {}).get("latitude") or config.get("location", {}).get("home_lat")
+        my_lon = config.get("my_location", {}).get("longitude") or config.get("location", {}).get("home_lon")
+        my_city = config.get("my_location", {}).get("city_name") or config.get("location", {}).get("home_city", "Poznań")
         prompt = get_active_prompt(config)
 
         for raw_item in listing_grid:
-            parsed = parse_olx_listing(raw_item)
-            item_id = parsed["id"]
+            if raw_item.get("is_html_fallback"):
+                item_id = raw_item["id"]
+                item_url = clean_url(raw_item["url"])
+                title = raw_item["title"]
+                price = raw_item["price_str"]
+                fallback_photo = raw_item["photo_url"]
+                item_dict_for_filter = {"title": title}
+                year = mileage = engine = fuel = "Brak"
+                city = "Polska"
+                lat = lon = None
+            else:
+                parsed = parse_olx_listing(raw_item)
+                item_id = parsed["id"]
+                item_url = parsed["url"]
+                title = parsed["title"]
+                price = parsed["price"]
+                fallback_photo = parsed["fallback_photo"]
+                item_dict_for_filter = parsed["raw_item"]
+                year = parsed["year"]
+                mileage = parsed["mileage"]
+                engine = parsed["engine_capacity"]
+                fuel = parsed["fuel_type"]
+                city = parsed["city"]
+                lat = parsed["lat"]
+                lon = parsed["lon"]
 
             if not item_id or item_id in seen_ids:
                 continue
@@ -402,47 +473,39 @@ def scan_target(target: dict, seen_ids: set, config: dict):
             seen_ids.add(item_id)
             save_seen_ids(seen_ids)
 
-            title = parsed["title"]
-            price = parsed["price"]
-            item_url = parsed["url"]
             platform = get_platform_name(item_url)
-
             logging.info(f"Nowa oferta ({platform}): {title} ({price})")
 
-            # Pobieranie pełnego opisu i 1. zdjęcia
-            description, photo_url = fetch_listing_details(item_url, fallback_photo=parsed["fallback_photo"])
+            # Pobranie pełnego opisu i bezpośredniego 1. zdjęcia z widoku ogłoszenia
+            description, photo_url = fetch_listing_details(item_url, fallback_photo=fallback_photo)
 
-            # Weryfikacja filtrów komisowych/handlarskich/sprowadzanych
-            is_dealer, dealer_reason = is_dealer_or_trader(parsed["raw_item"], description, config)
+            is_dealer, dealer_reason = is_dealer_or_trader(item_dict_for_filter, description, config)
             if is_dealer:
                 logging.info(f"Odrzucono ofertę {item_id}: {dealer_reason}")
                 continue
 
-            # Obliczenie szacunkowej odległości drogowej
             dist_str = "nieznana"
-            if my_lat and my_lon and parsed["lat"] and parsed["lon"]:
-                dist_km = haversine_distance(my_lat, my_lon, parsed["lat"], parsed["lon"])
+            if my_lat and my_lon and lat and lon:
+                dist_km = haversine_distance(my_lat, my_lon, lat, lon)
                 dist_str = f"~{dist_km} km od {my_city}"
 
-            # Przygotowanie kontekstu pod analizę LLM
             analysis_payload = (
                 f"Platforma: {platform}\n"
                 f"Tytuł: {title}\n"
                 f"Cena: {price}\n"
-                f"Rocznik: {parsed['year']} | Przebieg: {parsed['mileage']}\n"
-                f"Silnik: {parsed['engine_capacity']} cm3 | Paliwo: {parsed['fuel_type']}\n"
-                f"Lokalizacja: {parsed['city']}\n\n"
+                f"Rocznik: {year} | Przebieg: {mileage}\n"
+                f"Silnik: {engine} cm3 | Paliwo: {fuel}\n"
+                f"Lokalizacja: {city}\n\n"
                 f"Opis sprzedawcy:\n{description[:2500]}"
             )
 
             ai_summary = analyze_with_ai(prompt, analysis_payload)
 
-            # Formatowanie wiadomości Telegram z dynamiczną nazwą portalu
             msg = (
                 f"🚗 <b>TRAFIENIE: {title}</b>\n\n"
                 f"💰 <b>Cena:</b> {price}\n"
-                f"📅 <b>Rocznik:</b> {parsed['year']} | 🛣 <b>Przebieg:</b> {parsed['mileage']}\n"
-                f"📍 <b>Lokalizacja:</b> {parsed['city']} ({dist_str})\n"
+                f"📅 <b>Rocznik:</b> {year} | 🛣 <b>Przebieg:</b> {mileage}\n"
+                f"📍 <b>Lokalizacja:</b> {city} ({dist_str})\n"
                 f"🔗 <a href='{item_url}'>Otwórz ogłoszenie na {platform}</a>\n\n"
                 f"🤖 <b>ANALIZA MECHANIKA (AI):</b>\n{ai_summary}"
             )
