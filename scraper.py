@@ -1,7 +1,7 @@
 """Scraper ogłoszeń OLX: filtruje nowe oferty, dodaje analizę AI i wysyła alert na Telegram.
 
-Narzędzie do użytku osobistego, kilka zapytań co kilkanaście minut.
-Konfiguracja przez plik .env.
+Narzędzie w architekturze hybrydowej (Local GPU via Tailscale -> Cloud Groq Fallback).
+Konfiguracja dynamiczna z pliku config.json oraz środowiskowa z .env.
 """
 import html
 import json
@@ -35,7 +35,7 @@ except ImportError:
     fcntl = None
 
 # ============================================================
-# KONFIGURACJA
+# INICJALIZACJA I ŚRODOWISKO
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -46,6 +46,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("scraper")
+
+CONFIG_FILE = BASE_DIR / "config.json"
+DB_FILE = BASE_DIR / "seen_cars.jsonl"
+STATE_FILE = BASE_DIR / "scraper_state.json"
+LOCK_FILE = BASE_DIR / ".scraper.lock"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -62,19 +67,40 @@ GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "2000"))
 
 groq_client = Groq(api_key=GROQ_API_KEY) if (GROQ_API_KEY and Groq) else None
 
-DB_FILE = BASE_DIR / "seen_cars.jsonl"
-STATE_FILE = BASE_DIR / "scraper_state.json"
-LOCK_FILE = BASE_DIR / ".scraper.lock"
+DETAIL_FAIL_LIMIT = 3
+HEALTH_ALERT_AFTER = 6
+IMPERSONATE = "chrome120"
 
-PRICE_MIN = 20000
-PRICE_MAX = 35000
-YEAR_MIN = 2012
-MILEAGE_MAX = 200000
 
-POZNAN_LAT = 52.4064
-POZNAN_LON = 16.9252
+# ============================================================
+# ŁADOWANIE I ZAPIS KONFIGURACJI
+# ============================================================
+def load_config() -> dict:
+    if not CONFIG_FILE.exists():
+        raise FileNotFoundError(f"Brak pliku konfiguracyjnego: {CONFIG_FILE}")
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_config(cfg: dict) -> None:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+CONFIG = load_config()
+HOME_LAT = CONFIG.get("location", {}).get("home_lat", 52.4064)
+HOME_LON = CONFIG.get("location", {}).get("home_lon", 16.9252)
+HOME_CITY = CONFIG.get("location", {}).get("home_city", "Poznań")
+
+FORBIDDEN_WORDS = CONFIG.get("forbidden_words", [])
+FORBIDDEN_RE = re.compile(
+    r"(?<![^\W\d_])(?:" + "|".join(re.escape(w) for w in FORBIDDEN_WORDS) + r")(?![^\W\d_])",
+    re.IGNORECASE,
+)
+SUS_PHRASES = CONFIG.get("sus_phrases", [])
+
 CITY_COORDS_CACHE: dict[str, tuple[float, float]] = {
-    "poznań": (52.4064, 16.9252),
+    HOME_CITY.lower(): (HOME_LAT, HOME_LON),
     "warszawa": (52.2297, 21.0122),
     "wrocław": (51.1079, 17.0385),
     "kraków": (50.0647, 19.9450),
@@ -92,48 +118,58 @@ CITY_COORDS_CACHE: dict[str, tuple[float, float]] = {
     "margonin": (52.9717, 17.0944),
 }
 
-FORBIDDEN_WORDS = [
-    "kia", "ceed", "cee'd", "hyundai", "i30",
-    "diesel", "cdti", "crdi", "tdi", "multijet", "jtd", "hdi", "dci", "on", "d-4d"
-]
-FORBIDDEN_RE = re.compile(
-    r"(?<![^\W\d_])(?:" + "|".join(re.escape(w) for w in FORBIDDEN_WORDS) + r")(?![^\W\d_])",
-    re.IGNORECASE,
-)
 
-SUS_PHRASES = [
-    "igła", "igla", "niemiec płakał", "płakał jak sprzedawał", "jedyny taki",
-    "nie wymaga wkładu", "od emeryta", "od dziadka", "perełka", "stan salonowy",
-    "okazja", "100% bezwypadkowy", "bezwypadek", "panie"
-]
+# ============================================================
+# ZARZĄDZANIE PROMPTEM PRZEZ TELEGRAM
+# ============================================================
+def check_telegram_commands(state: dict) -> None:
+    """Sprawdza czy użytkownik nie wysłał komendy /prompt na Telegramie."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    last_update_id = state.get("last_tg_update_id", 0)
+    try:
+        res = requests.get(url, params={"offset": last_update_id + 1, "timeout": 2}, timeout=5)
+        if res.status_code == 200:
+            updates = res.json().get("result", [])
+            for u in updates:
+                state["last_tg_update_id"] = u["update_id"]
+                msg = u.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id"))
+                text = msg.get("text", "").strip()
 
-DETAIL_FAIL_LIMIT = 3
-HEALTH_ALERT_AFTER = 6
-IMPERSONATE = "chrome120"
-
-
-def build_url(slug: str) -> str:
-    base = f"https://www.olx.pl/motoryzacja/samochody/q-{slug}/"
-    params = (
-        f"?search%5Bfilter_float_price:from%5D={PRICE_MIN}"
-        f"&search%5Bfilter_float_price:to%5D={PRICE_MAX}"
-        f"&search%5Bfilter_float_year:from%5D={YEAR_MIN}"
-        f"&search%5Bfilter_float_milage:to%5D={MILEAGE_MAX}"
-        f"&search%5Bfilter_enum_petrol%5D%5B0%5D=petrol"
-        f"&search%5Bfilter_enum_petrol%5D%5B1%5D=lpg"
-        f"&search%5Border%5D=created_at:desc"
-    )
-    return base + params
-
-
-SEARCH_TARGETS = [
-    {"name": "Opel Astra J Kombi", "url": build_url("astra-j-kombi-1.4-turbo"), "model_type": "astra"},
-    {"name": "Fiat Tipo Kombi", "url": build_url("tipo-kombi"), "model_type": "tipo"},
-]
+                if chat_id == str(TELEGRAM_CHAT_ID):
+                    if text.startswith("/prompt "):
+                        new_prompt = text.replace("/prompt ", "", 1).strip()
+                        CONFIG["ai"]["system_prompt"] = new_prompt
+                        save_config(CONFIG)
+                        tg_send(f"✅ <b>Zaktualizowano prompt systemowy AI:</b>\n<i>{html.escape(new_prompt)}</i>")
+                    elif text == "/prompt":
+                        curr = CONFIG["ai"]["system_prompt"]
+                        tg_send(f"ℹ️ <b>Aktualny prompt AI:</b>\n<i>{html.escape(curr)}</i>\n\nAby zmienić: <code>/prompt [nowa treść]</code>")
+    except Exception as e:
+        log.debug("Nie udało się pobrać aktualizacji Telegrama: %s", e)
 
 
 # ============================================================
-# OBLICZANIE ODLEGŁOŚCI OD POZNANIA
+# GENEROWANIE ADRESU URL
+# ============================================================
+def build_url(target: dict) -> str:
+    base = f"https://www.olx.pl/motoryzacja/samochody/q-{target['olx_slug']}/"
+    params = [
+        f"search%5Bfilter_float_price:from%5D={target.get('price_min', 0)}",
+        f"search%5Bfilter_float_price:to%5D={target.get('price_max', 1000000)}",
+        f"search%5Bfilter_float_year:from%5D={target.get('year_min', 2000)}",
+        f"search%5Bfilter_float_milage:to%5D={target.get('mileage_max', 500000)}",
+        "search%5Border%5D=created_at:desc"
+    ]
+    for idx, fuel in enumerate(target.get("fuel_types", [])):
+        params.append(f"search%5Bfilter_enum_petrol%5D%5B{idx}%5D={fuel}")
+    return base + "?" + "&".join(params)
+
+
+# ============================================================
+# OBLICZANIE ODLEGŁOŚCI
 # ============================================================
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
@@ -144,7 +180,7 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return r * c
 
 
-def get_distance_from_poznan(location_raw: str) -> Optional[int]:
+def get_distance_from_home(location_raw: str) -> Optional[int]:
     clean_city = location_raw.split("-")[0].strip()
     clean_city = clean_city.split(",")[0].strip().lower()
     if not clean_city:
@@ -152,7 +188,7 @@ def get_distance_from_poznan(location_raw: str) -> Optional[int]:
 
     if clean_city in CITY_COORDS_CACHE:
         lat, lon = CITY_COORDS_CACHE[clean_city]
-        dist_air = haversine_km(POZNAN_LAT, POZNAN_LON, lat, lon)
+        dist_air = haversine_km(HOME_LAT, HOME_LON, lat, lon)
         return int(dist_air * 1.25)
 
     try:
@@ -164,7 +200,7 @@ def get_distance_from_poznan(location_raw: str) -> Optional[int]:
             lat = float(data["lat"])
             lon = float(data["lon"])
             CITY_COORDS_CACHE[clean_city] = (lat, lon)
-            dist_air = haversine_km(POZNAN_LAT, POZNAN_LON, lat, lon)
+            dist_air = haversine_km(HOME_LAT, HOME_LON, lat, lon)
             return int(dist_air * 1.25)
     except Exception:
         pass
@@ -172,7 +208,7 @@ def get_distance_from_poznan(location_raw: str) -> Optional[int]:
 
 
 # ============================================================
-# PARSOWANIE DANYCH
+# PARSOWANIE ROCZNIKA, PRZEBIEGU I CEPIK
 # ============================================================
 MONTHS_PL = {
     "stycznia": "01", "lutego": "02", "marca": "03", "kwietnia": "04",
@@ -183,13 +219,11 @@ MONTHS_PL = {
 VIN_CHARS = r"[A-HJ-NPR-Z0-9]"
 VIN_PLAIN_RE = re.compile(rf"\b{VIN_CHARS}{{17}}\b")
 VIN_SPACED_RE = re.compile(rf"VIN[:\s\-]+((?:{VIN_CHARS}[\s\-]?){{17}})")
-
 DATE_LABELED_RE = re.compile(
     r"(?:\b1\.?\s*rej\w*|pierwsz\w+\s+rejestracj\w*|data\s+(?:pierwszej\s+)?rejestracji)"
     r"[^\d]{0,25}(\d{1,2}[\s.\-/](?:[a-ząćęłńóśźż]+|\d{1,2})[\s.\-/]\d{4})",
     re.IGNORECASE,
 )
-
 PLATE_LABELED_RE = re.compile(
     r"(?i:nr\.?\s*rej\w*|numer\s+rejestracyjn\w*|tablice|blachy)"
     r"[^\w]{0,5}([A-Z]{2,3}\s?[A-Z0-9]{4,5})\b"
@@ -230,7 +264,6 @@ def extract_key_metrics(details: dict, raw_html: str, description: str, title: s
 
     clean_html = raw_html.replace("\xa0", " ")
 
-    # 1. Z parametrów
     for k, v in details.items():
         k_low = str(k).lower().strip()
         v_str = str(v).replace("\xa0", " ").strip()
@@ -248,13 +281,11 @@ def extract_key_metrics(details: dict, raw_html: str, description: str, title: s
                     mileage_num = int(digits)
                     mileage_str = f"{mileage_num:,}".replace(",", " ") + " km"
 
-    # 2. Nagłówek Otomoto ("Używany · 2012")
     if not year:
         m_used = re.search(r"Używany\s*·\s*(\d{4})", clean_html)
         if m_used and 2012 <= int(m_used.group(1)) <= 2026:
             year = m_used.group(1)
 
-    # 3. Kafelki Otomoto
     if not mileage_str:
         m_oto = re.search(r"(\d[\d\s]{2,8})\s*km[\s\S]{0,30}?(?:Przebieg|przebieg)", clean_html)
         if m_oto:
@@ -263,7 +294,6 @@ def extract_key_metrics(details: dict, raw_html: str, description: str, title: s
                 mileage_num = int(digits)
                 mileage_str = f"{mileage_num:,}".replace(",", " ") + " km"
 
-    # 4. Bezpośrednio z tytułu (np. "118 tys km" lub "180 000 km")
     if not mileage_str:
         m_t = re.search(r"(\d{2,3})\s*tys(?:\.|\b)?\s*km", title, re.IGNORECASE)
         if m_t:
@@ -277,14 +307,12 @@ def extract_key_metrics(details: dict, raw_html: str, description: str, title: s
                 mileage_num = int(digits)
                 mileage_str = f"{mileage_num:,}".replace(",", " ") + " km"
 
-    # 5. JSON
     if not mileage_str:
         m_json = re.search(r'["\']mileage["\']:\s*["\']?(\d+)', clean_html)
         if m_json and int(m_json.group(1)) > 500:
             mileage_num = int(m_json.group(1))
             mileage_str = f"{mileage_num:,}".replace(",", " ") + " km"
 
-    # 6. Fallback z tekstu AI
     if not mileage_str and ai_text:
         m_ai = re.search(r"(\d{2,3}[\s\xa0]?\d{3})\s*km", ai_text, re.IGNORECASE)
         if m_ai:
@@ -293,7 +321,6 @@ def extract_key_metrics(details: dict, raw_html: str, description: str, title: s
                 mileage_num = int(digits)
                 mileage_str = f"{mileage_num:,}".replace(",", " ") + " km"
 
-    # 7. Fallback z opisu
     if not mileage_str:
         m_desc = re.search(r"(?:przebieg[u:\s]*|przejechane\s*)(\d[\d\s]{2,7})\s*(?:tys\.?\s*)?km", description, re.IGNORECASE)
         if m_desc:
@@ -337,12 +364,10 @@ def extract_cepik_data(details: dict, raw_html: str, description: str) -> dict:
             norm_d = normalize_date(v)
             if norm_d:
                 data["first_reg_date"] = norm_d
-
         elif any(term in k for term in ["numer rejestracyjny", "nr rejestracyjny", "tablica"]):
             plate = re.sub(r"\s+", "", v).upper()
             if 7 <= len(plate) <= 8:
                 data["registration"] = plate
-
         elif k in ("vin", "numer vin", "vehicleidentificationnumber"):
             vin = re.sub(r"[\s\-]+", "", v).upper()
             if _valid_vin(vin):
@@ -354,7 +379,6 @@ def extract_cepik_data(details: dict, raw_html: str, description: str) -> dict:
             data["vin"] = m_vin.group(1).upper()
 
     text = description.replace("\xa0", " ")
-
     if not data["vin"]:
         upper = text.upper()
         for m in VIN_PLAIN_RE.finditer(upper):
@@ -468,40 +492,27 @@ def get_ad_details(url: str) -> Optional[tuple[dict, str, str]]:
 
 
 # ============================================================
-# ANALIZA AI (Ollama Tailscale -> Groq)
+# ANALIZA AI (Tailscale Ollama -> Cloud Groq Fallback)
 # ============================================================
-SYSTEM_PROMPT = (
-    "Jesteś bezwzględnym polskim mechanikiem i rzeczoznawcą aut. "
-    "Oceniasz konkretną ofertę bez lania wody. Pisz czystą, poprawną polszczyzną. "
-    "Nigdy nie wypisuj braków danych. Pisz wyłącznie o konkretach z ogłoszenia. "
-    "Odpowiadaj tylko w podanym formacie."
-)
-
-
 def build_user_prompt(title, price, location, details, description) -> str:
+    template = CONFIG.get("ai", {}).get("user_prompt_template", "")
     details_str = "\n".join(f"- {k}: {v}" for k, v in details.items() if v)
-    return f"""
-Oferta: {title} | Cena: {price} | Lokalizacja: {location}
-Dane:
-{details_str}
-
-Opis:
-\"\"\"{description}\"\"\"
-
-Format odpowiedzi:
-OCENA: [X/10 i 1 konkretne zdanie werdyktu opłacalności]
-SERWIS: [Wypisz wymienione części: rozrząd, oleje, hamulce, sprzęgło; jeśli brak wzmianki o naprawach, pomiń tę linię]
-LPG: [Jeśli ma już gaz: ile lat ma instalacja i kiedy koniec butli; jeśli nie ma gazu, pomiń tę linię]
-MINY: [1-2 ryzyka: typowe awarie tego silnika/skrzyni przy tym przebiegu lub podejrzane fragmenty opisu]
-"""
+    return template.format(
+        title=title,
+        price=price,
+        location=location,
+        details=details_str,
+        description=description
+    )
 
 
 def analyze_ollama(user_prompt: str) -> str:
+    system_prompt = CONFIG.get("ai", {}).get("system_prompt", "")
     client = ollama.Client(host=OLLAMA_HOST, timeout=OLLAMA_TIMEOUT)
     res = client.chat(
         model=OLLAMA_MODEL,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         options={"temperature": 0.2, "repeat_penalty": 1.2},
@@ -510,10 +521,11 @@ def analyze_ollama(user_prompt: str) -> str:
 
 
 def analyze_groq(model: str, user_prompt: str) -> str:
+    system_prompt = CONFIG.get("ai", {}).get("system_prompt", "")
     kwargs = dict(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
@@ -597,7 +609,7 @@ def tg_send(text: str) -> bool:
 def build_message(title, price, location, link, cepik, ai_analysis, year, mileage, distance_km, red_flags: list[str]) -> str:
     e = html.escape
     ai_block = e(ai_analysis[:1500]) if ai_analysis else "brak (AI niedostępne)"
-    dist_str = f" (~{distance_km} km od Poznania)" if distance_km is not None else ""
+    dist_str = f" (~{distance_km} km od {HOME_CITY})" if distance_km is not None else ""
 
     score = 0
     m_score = re.search(r"OCENA:\s*(\d{1,2})/10", ai_analysis or "")
@@ -711,15 +723,18 @@ def acquire_lock():
 
 
 # ============================================================
-# SKAN JEDNEGO MODELU
+# SKANOWANIE MODELU
 # ============================================================
 def scan_target(target: dict, seen_ids: set, state: dict) -> None:
     name = target["name"]
-    model_type = target.get("model_type", "")
+    url = build_url(target)
+    filters = target.get("filters", {})
+    mileage_max = target.get("mileage_max", 500000)
+
     log.info("Skanuję: %s", name)
 
     try:
-        res = requests.get(target["url"], impersonate=IMPERSONATE, timeout=15)
+        res = requests.get(url, impersonate=IMPERSONATE, timeout=15)
     except Exception as e:
         log.warning("Błąd połączenia z OLX: %s", e)
         report_health(state, name, False, f"błąd połączenia: {e}"[:80])
@@ -763,17 +778,18 @@ def scan_target(target: dict, seen_ids: set, state: dict) -> None:
         price = price_el.get_text(strip=True)
         location = loc_el.get_text(strip=True) if loc_el else "Brak lokalizacji"
 
+        # Globalne słowa zakazane
         if FORBIDDEN_RE.search(title):
             save_seen(offer_id, title, price, "skip_forbidden_title")
             seen_ids.add(offer_id)
             continue
 
-        if model_type == "astra":
-            title_low = title.lower()
-            if any(bad_engine in title_low for bad_engine in ["1.6", "1.7", "2.0", "1.8"]):
-                save_seen(offer_id, title, price, "skip_non_1.4t_title")
-                seen_ids.add(offer_id)
-                continue
+        # Zakazane frazy w tytule z konfiguracji danego auta
+        forbidden_titles = filters.get("forbidden_titles", [])
+        if any(bad in title.lower() for bad in forbidden_titles):
+            save_seen(offer_id, title, price, "skip_forbidden_target_title")
+            seen_ids.add(offer_id)
+            continue
 
         log.info("Nowa oferta: %s (%s)", title, price)
         result = get_ad_details(link)
@@ -789,6 +805,7 @@ def scan_target(target: dict, seen_ids: set, state: dict) -> None:
         detail_failures = 0
         details, description, raw_html = result
 
+        # Globalne sprawdzenie diesla po parametrach
         meta_str = " ".join([
             title,
             str(details.get("Paliwo", "")),
@@ -803,32 +820,37 @@ def scan_target(target: dict, seen_ids: set, state: dict) -> None:
             log.info("Odrzucono (diesel w parametrach: %s)", title)
             continue
 
-        if model_type == "astra":
+        # Filtr pojemności silnika z konfiguracji
+        capacity_patterns = filters.get("engine_capacity_patterns", [])
+        if capacity_patterns:
             engine_capacity = str(details.get("Poj. silnika", "")).replace(" ", "")
-            engine_power = str(details.get("Moc silnika", details.get("Moc", "")))
-
-            if engine_capacity and not any(cap in engine_capacity for cap in ["1364", "1400", "1398", "1.4"]):
-                save_seen(offer_id, title, price, "skip_not_1.4_engine")
+            if engine_capacity and not any(cap in engine_capacity for cap in capacity_patterns):
+                save_seen(offer_id, title, price, "skip_capacity_mismatch")
                 seen_ids.add(offer_id)
-                log.info("Odrzucono Astrę bez silnika 1.4: %s", title)
+                log.info("Odrzucono pojemność silnika (%s): %s", engine_capacity, title)
                 continue
 
-            if any(p in engine_power for p in ["87 KM", "100 KM"]):
-                save_seen(offer_id, title, price, "skip_astra_nonturbo")
+        # Filtr mocy silnika z konfiguracji
+        forbidden_power = filters.get("forbidden_power", [])
+        if forbidden_power:
+            engine_power = str(details.get("Moc silnika", details.get("Moc", "")))
+            if any(p in engine_power for p in forbidden_power):
+                save_seen(offer_id, title, price, "skip_power_mismatch")
                 seen_ids.add(offer_id)
-                log.info("Odrzucono Astrę 1.4 bez Turbo (87/100KM): %s", title)
+                log.info("Odrzucono moc silnika (%s): %s", engine_power, title)
                 continue
 
         ai_opinion = get_ai_analysis(title, price, location, details, description)
         year, mileage, mileage_num = extract_key_metrics(details, raw_html, description, title, ai_opinion)
 
-        if mileage_num and mileage_num > MILEAGE_MAX:
+        # Maksymalny przebieg z konfiguracji
+        if mileage_num and mileage_num > mileage_max:
             save_seen(offer_id, title, price, "skip_high_mileage")
             seen_ids.add(offer_id)
-            log.info("Odrzucono (przebieg %d > %d km): %s", mileage_num, MILEAGE_MAX, title)
+            log.info("Odrzucono (przebieg %d > %d km): %s", mileage_num, mileage_max, title)
             continue
 
-        distance_km = get_distance_from_poznan(location)
+        distance_km = get_distance_from_home(location)
         cepik = extract_cepik_data(details, raw_html, description)
         red_flags = check_red_flags(year, mileage_num, title, description)
 
@@ -853,10 +875,14 @@ def main() -> None:
     seen_ids = load_seen_ids()
     state = load_state()
 
-    log.info("Uruchomiono scraper. W bazie: %d ogłoszeń.", len(seen_ids))
+    # Sprawdzenie czy użytkownik wysłał nowe instrukcje promptu na Telegramie
+    check_telegram_commands(state)
+
+    targets = CONFIG.get("targets", [])
+    log.info("Uruchomiono scraper. W bazie: %d ogłoszeń. Modeli do przeszukania: %d", len(seen_ids), len(targets))
 
     try:
-        for idx, target in enumerate(SEARCH_TARGETS):
+        for idx, target in enumerate(targets):
             if idx > 0:
                 pause = random.uniform(5.0, 9.0)
                 log.info("Czekam %.1fs przed kolejnym modelem...", pause)
