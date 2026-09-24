@@ -1,107 +1,78 @@
-# 🚗 AI Car Deal Hunter (Hybrid Edge/Cloud Architecture)
+# 🚗 AI Car Deal Hunter
 
-Autonomiczny agent monitorujący rynek wtórny samochodów (OLX/Otomoto) w czasie rzeczywistym. Wykorzystuje zaawansowaną analizę rzeczoznawczą opartą na modelach LLM w architekturze hybrydowej (lokalne GPU przez Tailscale z automatycznym fallbackiem na Groq Cloud) oraz powiadomienia na Telegram.
+Osobisty agent, który co ~15 minut sprawdza nowe ogłoszenia samochodów na OLX, odsiewa handlarzy i niechciane silniki, ocenia ofertę modelem językowym i wysyła alert na Telegram. Działa jako usługa `systemd` na darmowej maszynie Oracle Cloud (Always Free).
 
----
+> Projekt do użytku osobistego: kilka zapytań na kwadrans, z losowymi opóźnieniami. Przed uruchomieniem sprawdź regulamin serwisu i `robots.txt`.
 
-## 🏗 Architektura systemu
+## Architektura
 
 ```
-[ OLX / Otomoto ] 
-       │ (TLS Fingerprinting / curl_cffi)
-       ▼
-[ Oracle Cloud VM ] ─── Harmonogram Systemd (co 15 min)
-       │
-       ├──► [ Tailscale Mesh VPN ] ──► Domowe GPU (Radeon RX 9070 XT + Ollama Qwen 2.5 7B)
-       │                                     │ (timeout / offline)
-       │                                     ▼
-       └─────────────────────────────► [ Groq Cloud API ] (Fallback: OpenAI GPT-OSS / Llama 3.3)
-                                             │
-                                             ▼
-                                    [ Telegram Bot API ]
+[ OLX ] ── curl_cffi ──► [ Oracle Cloud VM (Ubuntu, systemd timer co ~15 min) ]
+                                  │
+                                  ├─► Ollama na domowym GPU (przez Tailscale)
+                                  │        │ offline / timeout / zły format
+                                  │        ▼
+                                  └─► Groq API (gpt-oss-20b → llama-3.3-70b)
+                                           │
+                                           ▼
+                                   Telegram Bot API
 ```
 
-### Kluczowe funkcje:
-- **Hybrydowa inferencja (Edge-first):** Serwer w chmurze przesyła dane do domowej stacji roboczej przez prywatną sieć Tailscale Mesh, wykorzystując moc karty graficznej (Ollama). W razie wyłączenia stacji roboczej system natychmiast przełącza się na Groq API bez utraty danych.
-- **Data-Driven Configuration (`config.json`):** Całkowite oddzielenie logiki scrapującej od definicji poszukiwanych aut, filtrów silnikowych oraz promptu AI.
-- **Interaktywne zarządzanie z Telegrama:** Możliwość podglądu i zmiany promptu systemowego mechanika w locie za pomocą komendy `/prompt`.
-- **Rygorystyczna filtracja domenowa:** Odsiewanie niechcianych jednostek (np. silników wolnossących, diesli), limit przebiegu oraz automatyczne obliczanie odległości drogowej od miejsca zamieszkania.
-- **Detekcja anomalii i handlarskich pułapek:** Heurystyczna analiza rocznego przebiegu oraz wykrywanie podejrzanego słownictwa ("igła", "niemiec płakał", "perełka") z oznaczeniem czerwoną lampką.
-- **Ekstrakcja danych CEPiK:** Wyciąganie numerów VIN, numerów rejestracyjnych oraz daty pierwszej rejestracji bezpośrednio z metadanych Next.js i JSON-LD.
+## Co faktycznie robi
 
----
+- **Skan i deduplikacja:** lista wyników (`__NEXT_DATA__` lub karty HTML), baza widzianych ogłoszeń w `seen_cars.jsonl`, pierwsze uruchomienie tylko indeksuje oferty (bez zalewu alertów).
+- **Filtry sterowane konfiguracją (`config.json`):** zakazane słowa w tytule, zakazane paliwa, opcjonalny limit przebiegu, wykrywanie handlarzy (konta firmowe i frazy typu „faktura VAT", „raty").
+- **Dane do CEPiK:** VIN, numer rejestracyjny i data pierwszej rejestracji wyciągane z parametrów i opisu (tylko przy jednoznacznej etykiecie, żeby nie zgadywać).
+- **Odległość w linii prostej** od miejsca zamieszkania, gdy ogłoszenie ma współrzędne.
+- **Analiza AI z hybrydową inferencją:** lokalny model przez Tailscale, a przy awarii Groq.
+- **Odporność:** blokada przed równoległym uruchomieniem, ostrzeżenie na Telegramie po kilku nieudanych skanach z rzędu, ponawianie ofert, których nie udało się pobrać.
 
-## 🚀 Szybki start (Instrukcja wdrożenia)
+## Jak ograniczam „halucynacje" AI
 
-### 1. Klonowanie i instalacja środowiska
+1. **Wymuszony JSON** (schemat w Ollamie, `json_object` w Groq) zamiast swobodnego tekstu, a wiadomość składa kod, nie model.
+2. **Walidacja:** ocena musi być liczbą 1–10, teksty mają limity długości, puste odpowiedzi i „brak danych" są wycinane.
+3. **Sprawdzanie zgodności z opisem:** wzmianki o serwisie i LPG są usuwane, jeśli sprzedawca ich nie napisał.
+4. **Opis ogłoszenia to dane, nie polecenia** (ochrona przed prompt injection z treści ogłoszenia).
+5. Niska temperatura, stały seed, pola bez danych w ogóle nie trafiają do promptu.
+6. Gdy model zwróci błąd lub zły format, kod przechodzi do kolejnego silnika. Alert wychodzi nawet bez AI.
+
+## Wdrożenie (Oracle Cloud, Ubuntu 24.04)
 
 ```bash
-git clone [https://github.com/twoj-user/ai-car-deal-hunter.git](https://github.com/twoj-user/ai-car-deal-hunter.git)
-cd ai-car-deal-hunter
-
-# Utworzenie i aktywacja wirtualnego środowiska
+git clone https://github.com/<twoj-user>/ai-car-deal-hunter.git ~/scraper
+cd ~/scraper
 python3 -m venv venv
-source venv/bin/activate
+./venv/bin/pip install -r requirements.txt
 
-# Instalacja zależności
-pip install -r requirements.txt
+cp .env.example .env && chmod 600 .env   # uzupełnij klucze
 ```
 
----
+Na serwerze ustaw w `.env` `USE_OLLAMA=0`, jeśli nie masz dostępu do domowego GPU. Adres Ollamy (`OLLAMA_HOST`) to adres Tailscale komputera z GPU.
 
-### 2. Konfiguracja zmiennych środowiskowych (`.env`)
-
-Skopiuj szablon i uzupełnij klucze:
 ```bash
-cp .env.example .env
+sudo cp car-scraper.service car-scraper.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now car-scraper.timer
+
+systemctl list-timers | grep car-scraper
+journalctl -u car-scraper -n 50 --no-pager
 ```
 
-Zawartość `.env`:
-```env
-# Telegram
-TELEGRAM_BOT_TOKEN=twoj_token_bota
-TELEGRAM_CHAT_ID=twoje_chat_id
+Pliki jednostek muszą mieć końcówki linii LF. Jeśli edytowałeś je na Windowsie: `sed -i 's/\r$//' car-scraper.*`. Repozytorium wymusza LF w `.gitattributes`.
 
-# Inferencja lokalna (Tailscale + Ollama)
-USE_OLLAMA=1
-OLLAMA_HOST=[http://100.120.167.113:11434](http://100.120.167.113:11434)
-OLLAMA_MODEL=qwen2.5:7b
-OLLAMA_TIMEOUT=12
+## Konfiguracja
 
-# Fallback chmurowy (Groq)
-GROQ_API_KEY=twoj_klucz_groq
-GROQ_MODEL=openai/gpt-oss-20b
-GROQ_FALLBACK_MODEL=llama-3.3-70b-versatile
-GROQ_MAX_TOKENS=2000
+- `.env`: tokeny, adresy i modele (wzór w `.env.example`).
+- `config.json`: `search_targets` (adres wyszukiwania z OLX, opcjonalnie `title_keywords`), `filters`, `dealer_exclusions`, `ai.persona`, `ai.known_issues`. Filtry paliwa i typu nadwozia najłatwiej ustawić na OLX i wkleić gotowy adres do konfiguracji.
 
-LOG_LEVEL=INFO
+## Testy
+
+```bash
+./venv/bin/pip install pytest
+./venv/bin/pytest
 ```
 
----
+## Ograniczenia i pomysły
 
-### 3. Konfiguracja kryteriów poszukiwań (`config.json`)
-
-Wszystkie parametry aut, filtrów i promptu rzeczoznawcy definiuje plik `config.json`. Możesz go dostosować pod dowolny model bez edycji kodu Pythona:
-
-```json
-{
-  "location": {
-    "home_city": "Poznań",
-    "home_lat": 52.4064,
-    "home_lon": 16.9252
-  },
-  "ai": {
-    "system_prompt": "Jesteś bezwzględnym polskim mechanikiem i rzeczoznawcą aut. Oceniasz konkretną ofertę bez lania wody. Pisz czystą, poprawną polszczyzną. Nigdy nie wypisuj braków danych. Pisz wyłącznie o konkretach z ogłoszenia. Odpowiadaj tylko w podanym formacie."
-  },
-  "targets": [
-    {
-      "name": "Opel Astra J Kombi 1.4 Turbo",
-      "olx_slug": "astra-j-kombi-1.4-turbo",
-      "price_min": 20000,
-      "price_max": 35000,
-      "year_min": 2012,
-      "mileage_max": 200000,
-      "fuel_types": ["petrol", "lpg"],
-      "filters": {
-        "engine_capacity_patterns": ["1364", "1400", "1398", "1.4"],
-        "forbidden_titles": ["1.6", "1.7", "2.0", "1.8"],
+- Selektory HTML OLX mogą się zmienić. Wtedy scraper wyśle ostrzeżenie o braku wyników.
+- Do zrobienia: parser ogłoszeń Otomoto, sterowanie promptem komendą z Telegrama, heurystyka nietypowego przebiegu rocznego.

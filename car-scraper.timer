@@ -1,10 +1,12 @@
 [Unit]
-Description=Run Car Deal Scraper every 15 minutes
+Description=Uruchamiaj Car Deal Scraper co ok. 15 minut
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=15min
-Persistent=true
+# Liczone od zakończenia poprzedniego skanu, więc uruchomienia nigdy się nie nakładają
+OnUnitInactiveSec=15min
+RandomizedDelaySec=60
+Unit=car-scraper.service
 
 [Install]
 WantedBy=timers.target

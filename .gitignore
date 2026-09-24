@@ -1,29 +1,19 @@
+# Sekrety i klucze
 .env
-seen_cars.jsonl
-scraper_state.json
-.scraper.lock
-*.log
 *.pem
 *.key
 id_rsa*
+
+# Stan i logi scrapera
+seen_cars.jsonl
+seen_ids.json
+scraper_state.json
+.scraper.lock
+*.log
+
+# Python
 venv/
 .venv/
 __pycache__/
-# Środowisko i klucze
-.env
-venv/
-ENV/
-env/
-
-# Pamięć podręczna i stan scrapera
-seen_cars.jsonl
-scraper_state.json
-.scraper.lock
-scraper.log
-
-# Python cache
-__pycache__/
 *.py[cod]
-*$py.class
-*.so
 .pytest_cache/
