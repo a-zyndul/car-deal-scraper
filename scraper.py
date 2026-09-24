@@ -71,56 +71,75 @@ def save_seen_ids(seen_ids: set):
         json.dump(list(seen_ids), f, ensure_ascii=False, indent=2)
 
 
-def is_dealer_or_trader(item_dict: dict, description: str, config: dict) -> tuple[bool, str]:
+def is_dealer_or_trader(title: str, description: str, config: dict, is_business: bool = False) -> tuple[bool, str]:
     exclusions = config.get("dealer_exclusions", {})
-    if exclusions.get("reject_company_sellers", True):
-        user_info = item_dict.get("user", {})
-        if user_info.get("company_name") or user_info.get("is_business"):
-            return True, "Konto firmowe / komis"
+    if exclusions.get("reject_company_sellers", True) and is_business:
+        return True, "Konto firmowe / komis"
 
-    full_text = f"{item_dict.get('title', '')} {description}".lower()
+    full_text = f"{title} {description}".lower()
     banned_keywords = exclusions.get("banned_keywords", [])
 
     for kw in banned_keywords:
         if kw.lower() in full_text:
-            return True, f"Wykryto frazę handlarską: '{kw}'"
+            return True, f"Wykryto frazę: '{kw}'"
 
     return False, ""
 
 
-def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, str]:
+def fetch_listing_details(url: str, fallback_photo: str = None) -> tuple[str, str, dict]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
     }
+    extracted_params = {}
     try:
         r = requests.get(url, headers=headers, impersonate="chrome120", timeout=12)
         if r.status_code != 200:
-            return "Brak opisu", fallback_photo
+            return "Brak opisu", fallback_photo, extracted_params
 
         soup = BeautifulSoup(r.text, "html.parser")
         description = ""
 
-        # Opis OLX
+        # Wyciąganie opisu (OLX)
         desc_div = soup.find("div", {"data-cy": "ad_description"})
         if desc_div:
             description = desc_div.get_text(separator="\n", strip=True)
 
-        # Opis Otomoto
+        # Wyciąganie opisu (Otomoto)
         if not description:
             desc_sec = soup.find("div", {"data-read-more": "true"}) or soup.find("section", id="description")
             if desc_sec:
                 description = desc_sec.get_text(separator="\n", strip=True)
 
-        # Szukanie 1. zdjęcia (najwyższa jakość z ogłoszenia)
+        # Wyciąganie najlepszego zdjęcia z ogłoszenia
         photo_url = fallback_photo
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             photo_url = og_img["content"]
 
-        return description or "Brak opisu", photo_url
+        # Odczytywanie parametrów tekstowych (dla Otomoto i HTML fallback)
+        text_full = soup.get_text()
+        year_match = re.search(r"Rok produkcji\s*[:\-]?\s*(\d{4})", text_full, re.IGNORECASE)
+        if year_match:
+            extracted_params["year"] = year_match.group(1)
+
+        mileage_match = re.search(r"Przebieg\s*[:\-]?\s*([\d\s]+)\s*km", text_full, re.IGNORECASE)
+        if mileage_match:
+            extracted_params["mileage"] = mileage_match.group(1).replace(" ", "") + " km"
+
+        engine_match = re.search(r"Pojemność skokowa\s*[:\-]?\s*([\d\s]+)\s*cm3", text_full, re.IGNORECASE)
+        if engine_match:
+            extracted_params["engine"] = engine_match.group(1).replace(" ", "")
+
+        fuel_match = re.search(r"Rodzaj paliwa\s*[:\-]?\s*([A-Za-zżźćńółęąśŻŹĆĄŚĘŁÓŃ\s\+\/]+)", text_full, re.IGNORECASE)
+        if fuel_match:
+            raw_fuel = fuel_match.group(1).strip().split("\n")[0]
+            if len(raw_fuel) < 20:
+                extracted_params["fuel"] = raw_fuel
+
+        return description or "Brak opisu", photo_url, extracted_params
     except Exception as e:
-        logging.warning(f"Błąd pobierania detali {url}: {e}")
-        return "Brak opisu", fallback_photo
+        logging.warning(f"Błąd pobierania detali z {url}: {e}")
+        return "Brak opisu", fallback_photo, extracted_params
 
 
 def analyze_with_ai(system_prompt: str, user_payload: str) -> str:
@@ -143,7 +162,7 @@ def analyze_with_ai(system_prompt: str, user_payload: str) -> str:
             logging.error(f"Błąd Ollama HTTP {r.status_code}: {r.text}")
     except Exception as e:
         logging.error(f"Wyjątek podczas komunikacji z Ollamą: {e}")
-    return "Nie udało się wygenerować analizy AI."
+    return "Błąd generowania analizy AI."
 
 
 def send_telegram_message(caption: str, photo_url: str = None):
@@ -151,31 +170,32 @@ def send_telegram_message(caption: str, photo_url: str = None):
         logging.warning("Brak tokenów Telegrama w .env")
         return
 
-    # Jeśli mamy zdjęcie, wysyłamy jako sendPhoto
-    if photo_url:
+    # Wysłanie zdjęcia natywnie (sendPhoto) bez błędu 400
+    if photo_url and photo_url.startswith("http"):
         send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         data = {
             "chat_id": TELEGRAM_CHAT_ID,
+            "photo": photo_url,
             "caption": caption[:1024],
             "parse_mode": "HTML"
         }
         try:
-            r = requests.post(send_url, data=data, json={"photo": photo_url}, timeout=15)
+            r = requests.post(send_url, data=data, timeout=15)
             if r.status_code == 200:
                 logging.info("Wysłano powiadomienie ze zdjęciem na Telegram")
                 return
             else:
-                logging.warning(f"Telegram photo error ({r.status_code}), próba tekstem...")
+                logging.warning(f"Telegram photo error ({r.status_code}): {r.text}, wysyłam tekst...")
         except Exception as e:
             logging.warning(f"Błąd wysyłki zdjęcia: {e}")
 
-    # Fallback na zwykły sendMessage
+    # Fallback na wiadomość tekstową
     send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": caption[:4096],
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True
     }
     try:
         r = requests.post(send_url, json=payload, timeout=10)
@@ -207,7 +227,7 @@ def scan_target(target: dict, seen_ids: set, config: dict):
         soup = BeautifulSoup(r.text, "html.parser")
         listing_grid = []
 
-        # 1. Próba z tagu __NEXT_DATA__
+        # 1. Próba pobrania danych ze skryptu __NEXT_DATA__
         script_tag = soup.find("script", id="__NEXT_DATA__")
         if script_tag and script_tag.string:
             try:
@@ -221,7 +241,7 @@ def scan_target(target: dict, seen_ids: set, config: dict):
             except Exception as e:
                 logging.warning(f"Błąd parsowania __NEXT_DATA__: {e}")
 
-        # 2. Fallback: Parsowanie HTML z twardym filtrem motoryzacji
+        # 2. Bezpieczny fallback HTML – wyłącznie ogłoszenia aut
         if not listing_grid:
             main_listing = soup.find("div", {"data-testid": "listing-grid"})
             cards = main_listing.find_all("div", {"data-cy": "l-card"}) if main_listing else soup.find_all("div", {"data-cy": "l-card"})
@@ -234,10 +254,9 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 if not ad_url.startswith("http"):
                     ad_url = f"https://www.olx.pl{ad_url}"
 
-                # FILTR ANTY-WAZONOWY: Dopuszczamy wyłącznie kategorie motoryzacji lub otomoto
+                # Ignoruj ogłoszenia spoza motoryzacji
                 lower_url = ad_url.lower()
-                is_car = ("otomoto.pl" in lower_url) or ("/motoryzacja/" in lower_url) or ("/samochody/" in lower_url)
-                if not is_car:
+                if not any(k in lower_url for k in ["otomoto.pl", "/motoryzacja/", "/samochody/"]):
                     continue
 
                 title_tag = card.find("h6") or card.find("h4")
@@ -264,23 +283,25 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 })
 
         if not listing_grid:
-            logging.info("Brak ogłoszeń na liście.")
+            logging.info("Brak nowych ogłoszeń na liście.")
             return
 
         my_lat = config.get("location", {}).get("home_lat") or config.get("my_location", {}).get("latitude")
         my_lon = config.get("location", {}).get("home_lon") or config.get("my_location", {}).get("longitude")
         my_city = config.get("location", {}).get("home_city") or config.get("my_location", {}).get("city_name", "Poznań")
-        system_prompt = config.get("system_prompt", "Jesteś mechanikiem. Oceń auto.")
+        system_prompt = config.get("system_prompt", "Jesteś mechanikiem. Oceń stan techniczny i opłacalność auta.")
 
         for item in listing_grid:
-            if item.get("is_html_fallback"):
+            is_fallback = item.get("is_html_fallback", False)
+
+            if is_fallback:
                 item_id = item["id"]
                 item_url = clean_url(item["url"])
                 title = item["title"]
                 price = item["price_str"]
                 fallback_photo = item["photo_url"]
-                item_dict_for_filter = {"title": title}
-                year = mileage = engine = fuel = "Brak danych"
+                is_business = False
+                year = mileage = engine = fuel = ""
                 city = "Polska"
                 lat = lon = None
             else:
@@ -290,17 +311,18 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 price_data = item.get("price", {})
                 price = price_data.get("displayValue") or f"{price_data.get('value')} zł"
                 params = {p.get("key"): p.get("value", {}).get("label") for p in item.get("params", []) if p.get("key")}
-                year = params.get("year", "Brak")
-                mileage = params.get("milage", "Brak")
-                engine = params.get("engine_capacity", "Brak")
-                fuel = params.get("petrol", "Brak")
+                year = params.get("year", "")
+                mileage = params.get("milage", "")
+                engine = params.get("engine_capacity", "")
+                fuel = params.get("petrol", "")
                 loc = item.get("location", {})
                 city = loc.get("city", {}).get("name", "Polska")
                 lat = loc.get("latitude")
                 lon = loc.get("longitude")
+                user_info = item.get("user", {})
+                is_business = bool(user_info.get("company_name") or user_info.get("is_business"))
                 photos = item.get("photos", [])
                 fallback_photo = photos[0].get("link", "").replace("{width}x{height}", "1000x750") if photos else None
-                item_dict_for_filter = item
 
             if not item_id or item_id in seen_ids:
                 continue
@@ -310,10 +332,20 @@ def scan_target(target: dict, seen_ids: set, config: dict):
 
             platform = get_platform_name(item_url)
 
-            # Pobranie opisu i lepszego zdjęcia
-            description, photo_url = fetch_listing_details(item_url, fallback_photo=fallback_photo)
+            # Pobieranie szczegółowego opisu i brakujących parametrów z pojedynczej strony
+            description, photo_url, extra_params = fetch_listing_details(item_url, fallback_photo=fallback_photo)
 
-            is_dealer, dealer_reason = is_dealer_or_trader(item_dict_for_filter, description, config)
+            if not year and "year" in extra_params:
+                year = extra_params["year"]
+            if not mileage and "mileage" in extra_params:
+                mileage = extra_params["mileage"]
+            if not engine and "engine" in extra_params:
+                engine = extra_params["engine"]
+            if not fuel and "fuel" in extra_params:
+                fuel = extra_params["fuel"]
+
+            # Wykluczenia handlarzy / sprowadzonych
+            is_dealer, dealer_reason = is_dealer_or_trader(title, description, config, is_business=is_business)
             if is_dealer:
                 logging.info(f"Odrzucono ofertę ({dealer_reason}): {title}")
                 continue
@@ -325,14 +357,18 @@ def scan_target(target: dict, seen_ids: set, config: dict):
                 dist_km = haversine_distance(my_lat, my_lon, lat, lon)
                 dist_str = f"~{dist_km} km od {my_city}"
 
+            display_year = year if year else "Brak w tytule"
+            display_mileage = mileage if mileage else "Brak w tytule"
+            display_engine = f"{engine} cm3" if engine else "Brak"
+            display_fuel = fuel if fuel else "Brak"
+
             analysis_payload = (
-                f"Platforma: {platform}\n"
-                f"Tytuł: {title}\n"
+                f"Samochód: {title}\n"
                 f"Cena: {price}\n"
-                f"Rocznik: {year} | Przebieg: {mileage}\n"
-                f"Silnik: {engine} cm3 | Paliwo: {fuel}\n"
-                f"Lokalizacja: {city}\n\n"
-                f"Opis ogłoszenia:\n{description[:2500]}"
+                f"Rocznik: {display_year}\n"
+                f"Przebieg: {display_mileage}\n"
+                f"Silnik: {display_engine} | Paliwo: {display_fuel}\n\n"
+                f"Opis sprzedawcy:\n{description[:3000]}"
             )
 
             ai_summary = analyze_with_ai(system_prompt, analysis_payload)
@@ -340,7 +376,7 @@ def scan_target(target: dict, seen_ids: set, config: dict):
             msg = (
                 f"🚗 <b>TRAFIENIE: {title}</b>\n\n"
                 f"💰 <b>Cena:</b> {price}\n"
-                f"📅 <b>Rocznik:</b> {year} | 🛣 <b>Przebieg:</b> {mileage}\n"
+                f"📅 <b>Rocznik:</b> {display_year} | 🛣 <b>Przebieg:</b> {display_mileage}\n"
                 f"📍 <b>Lokalizacja:</b> {city} ({dist_str})\n"
                 f"🔗 <a href='{item_url}'>Otwórz ogłoszenie na {platform}</a>\n\n"
                 f"🤖 <b>ANALIZA MECHANIKA (AI):</b>\n{ai_summary}"
