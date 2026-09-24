@@ -1,14 +1,19 @@
 {
-  "my_location": {
-    "city_name": "Poznań",
-    "latitude": 52.4064,
-    "longitude": 16.9252
-  },
   "location": {
     "home_city": "Poznań",
     "home_lat": 52.4064,
     "home_lon": 16.9252
   },
+  "search_targets": [
+    {
+      "name": "Opel Astra",
+      "url": "https://www.olx.pl/motoryzacja/samochody/opel/astra/?search%5Border%5D=created_at%3Adesc"
+    },
+    {
+      "name": "Fiat Tipo Kombi",
+      "url": "https://www.olx.pl/motoryzacja/samochody/fiat/tipo/?search%5Bfilter_enum_car_body%5D%5B0%5D=combi&search%5Border%5D=created_at%3Adesc"
+    }
+  ],
   "system_prompt": "Jesteś bezwzględnym polskim mechanikiem i rzeczoznawcą aut. Oceniasz konkretną ofertę bez lania wody. Pisz czystą, poprawną polszczyzną. Nigdy nie wypisuj braków danych. Pisz wyłącznie o konkretach z ogłoszenia. Format odpowiedzi:\nOCENA: [X/10 i 1 konkretne zdanie werdyktu opłacalności]\nSERWIS: [Wypisz wymienione części: rozrząd, oleje, hamulce, sprzęgło; jeśli brak wzmianki o naprawach, pomiń tę linię]\nLPG: [Jeśli ma już gaz: ile lat ma instalacja i kiedy koniec butli; jeśli nie ma gazu, pomiń tę linię]\nMINY: [1-2 ryzyka: typowe awarie tego silnika/skrzyni przy tym przebiegu lub podejrzane fragmenty opisu]",
   "dealer_exclusions": {
     "reject_company_sellers": true,
@@ -63,17 +68,5 @@
       "powrót na kołach",
       "powrot na kolach"
     ]
-  },
-  "search_targets": [
-    {
-      "name": "Fiat Tipo Kombi",
-      "url": "https://www.olx.pl/motoryzacja/samochody/fiat/tipo/?search%5Bfilter_enum_car_body%5D%5B0%5D=combi"
-    }
-  ],
-  "targets": [
-    {
-      "name": "Fiat Tipo Kombi",
-      "url": "https://www.olx.pl/motoryzacja/samochody/fiat/tipo/?search%5Bfilter_enum_car_body%5D%5B0%5D=combi"
-    }
-  ]
+  }
 }
