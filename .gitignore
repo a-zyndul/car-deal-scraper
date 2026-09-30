@@ -1,19 +1,19 @@
-# Sekrety i klucze
+# Sekrety i Twoje preferencje
 .env
-*.pem
-*.key
-id_rsa*
+config.json
+config.json
 
-# Stan i logi scrapera
-seen_cars.jsonl
-seen_ids.json
-scraper_state.json
-.scraper.lock
-*.log
+
+# Stan i debug
+*.db
+*.sqlite
+debug/
+debug_page.*
 
 # Python
+__pycache__/
+*.pyc
 venv/
 .venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
+.vscode/
+config.json

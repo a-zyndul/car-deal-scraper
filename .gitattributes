@@ -1,6 +1,0 @@
-* text=auto
-# Pliki uruchamiane na Linuksie muszą mieć końcówki LF (CRLF psuje jednostki systemd)
-*.service text eol=lf
-*.timer text eol=lf
-*.sh text eol=lf
-*.py text eol=lf

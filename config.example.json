@@ -1,0 +1,29 @@
+{
+  "max_pages": 3,
+  "max_alerts_per_run": 15,
+  "searches": [
+    {
+      "platform": "otomoto",
+      "url": "WKLEJ_TUTAJ_URL_SKOPIOWANY_Z_PRZEGLADARKI_PO_USTAWIENIU_FILTROW_NA_OTOMOTO"
+    },
+    {
+      "platform": "olx",
+      "url": "WKLEJ_TUTAJ_URL_Z_OLX_Motoryzacja_Samochody_Z_FILTRAMI"
+    },
+    {
+      "platform": "autoplac",
+      "url": "WKLEJ_TUTAJ_URL_Z_AUTOPLAC_Z_FILTRAMI"
+    }
+  ],
+  "criteria": {
+    "price_min": 25000,
+    "price_max": 40000,
+    "year_min": 2016,
+    "year_max": 2020,
+    "mileage_max": 200000,
+    "title_keywords_any": ["tipo"],
+    "exclude_fuels": ["diesel", "elektry", "hybryd"],
+    "exclude_brands": [],
+    "exclude_phrases": ["uszkodzon", "po wypadku", "po kolizji", "na części", "do remontu", "do poprawek", "szkoda całkowita"]
+  }
+}
