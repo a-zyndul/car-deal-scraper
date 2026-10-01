@@ -6,6 +6,8 @@
   python main.py --loop        # w kółko co CHECK_INTERVAL_MINUTES
 """
 import argparse
+import asyncio
+import inspect
 import logging
 import statistics
 import time
@@ -38,14 +40,13 @@ def market_hint(listings) -> str:
 def run_once(cfg, args) -> None:
     criteria = Criteria.from_dict(cfg.get("criteria", {}))
     max_pages = int(cfg.get("max_pages", 3))
-    max_alerts = int(cfg.get("max_alerts_per_run", 50
-    ))
+    max_alerts = int(cfg.get("limit_alerts_per_run", cfg.get("max_alerts_per_run", 50)))
 
     db = Database(config.DB_PATH)
     notifier = TelegramNotifier()
     ai = AIAnalyzer()
 
-# grupujemy adresy wg platformy: zbieramy ze wszystkich wyszukiwań w configu
+    # grupujemy adresy wg platformy: zbieramy ze wszystkich wyszukiwań w configu
     urls = defaultdict(list)
     for s in cfg["searches"]:
         for plat in ["otomoto", "olx", "autoplac"]:
@@ -62,7 +63,11 @@ def run_once(cfg, args) -> None:
             log.error("Nieznana platforma: %s", platform)
             continue
         try:
-            found = cls(headless=config.HEADLESS_MODE, max_pages=max_pages).fetch_listings(plat_urls)
+            res = cls(headless=config.HEADLESS_MODE, max_pages=max_pages).fetch_listings(plat_urls)
+            if inspect.iscoroutine(res):
+                found = asyncio.run(res)
+            else:
+                found = res
         except Exception:
             log.exception("[%s] pobieranie nie powiodło się — idę dalej", platform)
             continue
