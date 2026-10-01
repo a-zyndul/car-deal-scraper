@@ -14,7 +14,7 @@ from .base import (BaseAdapter, Listing, find_mileage, find_price, find_year,
 class OlxAdapter(BaseAdapter):
     platform = "olx"
     base_url = "https://www.olx.pl"
-    wait_selector = 'div[data-cy="l-card"]'
+    wait_selector = 'div[data-cy="l-card"], div[data-testid="listing-grid"], article'
 
     def parse(self, html: str) -> List[Listing]:
         soup = BeautifulSoup(html, "html.parser")

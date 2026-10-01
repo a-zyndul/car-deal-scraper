@@ -38,18 +38,22 @@ def market_hint(listings) -> str:
 def run_once(cfg, args) -> None:
     criteria = Criteria.from_dict(cfg.get("criteria", {}))
     max_pages = int(cfg.get("max_pages", 3))
-    max_alerts = int(cfg.get("max_alerts_per_run", 15))
+    max_alerts = int(cfg.get("max_alerts_per_run", 50
+    ))
 
     db = Database(config.DB_PATH)
     notifier = TelegramNotifier()
     ai = AIAnalyzer()
 
-    # grupujemy adresy wg platformy: jedna przeglądarka na platformę
+# grupujemy adresy wg platformy: zbieramy ze wszystkich wyszukiwań w configu
     urls = defaultdict(list)
     for s in cfg["searches"]:
-        if args.only and s["platform"] not in args.only:
-            continue
-        urls[s["platform"]].append(s["url"])
+        for plat in ["otomoto", "olx", "autoplac"]:
+            url_key = f"url_{plat}"
+            if url_key in s and s[url_key]:
+                if args.only and plat not in args.only:
+                    continue
+                urls[plat].append(s[url_key])
 
     matched = []
     for platform, plat_urls in urls.items():
